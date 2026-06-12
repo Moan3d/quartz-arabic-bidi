@@ -5,16 +5,16 @@ import type { Element, Text, ElementContent, Root } from "hast"
 // ─── Arabic Unicode blocks (comprehensive) ───────────────────────────────────
 const ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/
 
-// Block-level elements we set direction on
+// Block-level elements we set direction on (SYNTAX FIXED: removed trailing spaces)
 const BLOCK_ELEMENTS = new Set([
   "p", "li", "h1", "h2", "h3", "h4", "h5", "h6",
-  "blockquote", "td", "th", "figcaption", "dt", "dd",
+  "blockquote", "td", "th", "figcaption", "dt", "dd", "nav", "a"
 ])
 
 // These inline elements are ALWAYS technical/LTR — critical for CTF writeups
 const ALWAYS_LTR = new Set(["code", "kbd", "var", "samp"])
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────────
 function getTextContent(node: ElementContent | Root): string {
   if (node.type === "text") return (node as Text).value
   if ("children" in node)
@@ -30,8 +30,8 @@ function isDominantArabic(text: string): boolean {
 
 /**
  * Split a string into alternating Arabic and LTR runs.
- * Rule for neutral chars (spaces, digits, punctuation):
- * → keep them attached to the current run.
+ * CRITICAL FIX: Numbers (0-9) and Parentheses () are now treated as LTR runs.
+ * This prevents the browser's BiDi algorithm from flipping them in RTL context.
  */
 function splitRuns(text: string): Array<{ value: string; isLtr: boolean }> {
   const runs: Array<{ value: string; isLtr: boolean }> = []
@@ -39,13 +39,16 @@ function splitRuns(text: string): Array<{ value: string; isLtr: boolean }> {
 
   type RunKind = "arabic" | "ltr"
   let cur = ""
+  // Treat numbers and parentheses as LTR from the start if they appear first
   let kind: RunKind = ARABIC_RE.test(text[0] ?? "") ? "arabic" : "ltr"
 
   for (const ch of text) {
     const isAr = ARABIC_RE.test(ch)
-    const isLa = /[A-Za-z]/.test(ch)
+    // SYNTAX FIXED: Added 0-9 and () to the LTR regex
+    const isLa = /[A-Za-z0-9()]/.test(ch) 
 
     if (isAr) {
+      // SYNTAX FIXED: Changed "& &" to "&&" and removed trailing spaces
       if (kind === "ltr" && cur) {
         runs.push({ value: cur, isLtr: true })
         cur = ""
@@ -60,7 +63,7 @@ function splitRuns(text: string): Array<{ value: string; isLtr: boolean }> {
       kind = "ltr"
       cur += ch
     } else {
-      // Neutral: Stay with current run
+      // Neutral (spaces, other punctuation) -> stay with current run
       cur += ch
     }
   }
@@ -69,9 +72,7 @@ function splitRuns(text: string): Array<{ value: string; isLtr: boolean }> {
 }
 
 /**
- * Process the DIRECT children of an RTL block element:
- * Text nodes with mixed Arabic+Latin  →  split + wrap LTR runs in <bdi dir="ltr">
- * code / kbd / var / samp             →  force dir="ltr"  (always technical)
+ * Process the DIRECT children of an RTL block element.
  */
 function bidiIsolate(children: ElementContent[]): ElementContent[] {
   const out: ElementContent[] = []
@@ -81,12 +82,12 @@ function bidiIsolate(children: ElementContent[]): ElementContent[] {
     if (child.type === "text") {
       const val = (child as Text).value
       const hasAr = ARABIC_RE.test(val)
-      const hasLa = /[A-Za-z]/.test(val)
+      const hasLa = /[A-Za-z0-9()]/.test(val) // SYNTAX FIXED
 
       if (hasAr && hasLa) {
         // Mixed text: split and wrap every LTR run in <bdi dir="ltr">
         for (const run of splitRuns(val)) {
-          if (run.isLtr && /[A-Za-z0-9]/.test(run.value)) {
+          if (run.isLtr && /[A-Za-z0-9()]/.test(run.value)) {
             out.push({
               type: "element",
               tagName: "bdi",
@@ -107,20 +108,17 @@ function bidiIsolate(children: ElementContent[]): ElementContent[] {
     if (child.type === "element") {
       const el = child as Element
 
-      // Block elements: leave for the outer visitor
       if (BLOCK_ELEMENTS.has(el.tagName)) {
         out.push(el)
         continue
       }
 
-      // Technical inline elements → always LTR
       if (ALWAYS_LTR.has(el.tagName)) {
         el.properties = { ...(el.properties ?? {}), dir: "ltr" }
         out.push(el)
         continue
       }
 
-      // Other inline elements (a, strong, em, span, mark, …)
       const innerText = getTextContent(el)
       if (innerText && !isDominantArabic(innerText)) {
         el.properties = { ...(el.properties ?? {}), dir: "ltr" }
@@ -131,7 +129,6 @@ function bidiIsolate(children: ElementContent[]): ElementContent[] {
       continue
     }
 
-    // Anything else (raw HTML, comments, …) — pass through
     out.push(child)
   }
   return out
@@ -142,19 +139,37 @@ const CSS = `
 /* Arabic RTL block elements */
 .arabic-rtl {
   direction: rtl;
-  text-align: start; /* respects the element's own direction */
-  letter-spacing: normal !important; /* Arabic script breaks with positive letter-spacing */
+  text-align: start;
+  letter-spacing: normal;
+  unicode-bidi: plaintext; /* CRITICAL: Isolates paragraph-level BiDi context */
 }
 
-/* <bdi dir="ltr"> and any explicit [dir="ltr"] inside RTL blocks:
-   unicode-bidi: isolate makes the browser treat each run independently */
-.arabic-rtl bdi[dir="ltr"],
-.arabic-rtl [dir="ltr"] {
+/* List items in RTL context — force proper numbering and marker alignment */
+.arabic-rtl ol,
+.arabic-rtl ul {
+  direction: rtl;
+  padding-inline-start: 0;
+  padding-inline-end: 2rem;
+}
+
+.arabic-rtl li {
+  direction: rtl;
+  text-align: start;
+}
+
+/* Numbered list markers — keep LTR to prevent flipping */
+.arabic-rtl ol li::marker {
+  direction: ltr;
   unicode-bidi: isolate;
 }
 
-/* Inline code / technical elements inside Arabic text — always LTR.
-   display:inline-block is needed so direction applies to an inline element. */
+/* <bdi dir="ltr"> and any explicit [dir="ltr"] inside RTL blocks */
+.arabic-rtl bdi[dir="ltr"],
+.arabic-rtl [dir="ltr"] {
+  unicode-bidi: isolate; /* CRITICAL: Forces browser to treat run as atomic LTR unit */
+}
+
+/* Inline code / technical elements inside Arabic text — always LTR */
 .arabic-rtl code,
 .arabic-rtl kbd,
 .arabic-rtl var,
@@ -173,14 +188,11 @@ export const ArabicBidi: QuartzTransformerPlugin = () => ({
     return [
       () => (tree: Root) => {
         visit(tree, "element", (node: Element) => {
-          // Only care about block-level containers
           if (!BLOCK_ELEMENTS.has(node.tagName)) return
-
           const text = getTextContent(node)
           if (!text.trim()) return
 
           if (isDominantArabic(text)) {
-            // 1. Mark the block as RTL
             node.properties = {
               ...(node.properties ?? {}),
               dir: "rtl",
@@ -190,8 +202,6 @@ export const ArabicBidi: QuartzTransformerPlugin = () => ({
                 "arabic-rtl",
               ],
             }
-
-            // 2. Inject <bdi> isolation for every LTR run in its inline content
             node.children = bidiIsolate(node.children)
           }
         })

@@ -217,7 +217,9 @@ var BLOCK_ELEMENTS = /* @__PURE__ */ new Set([
   "th",
   "figcaption",
   "dt",
-  "dd"
+  "dd",
+  "nav",
+  "a"
 ]);
 var ALWAYS_LTR = /* @__PURE__ */ new Set(["code", "kbd", "var", "samp"]);
 function getTextContent(node) {
@@ -238,7 +240,7 @@ function splitRuns(text) {
   let kind = ARABIC_RE.test(text[0] ?? "") ? "arabic" : "ltr";
   for (const ch of text) {
     const isAr = ARABIC_RE.test(ch);
-    const isLa = /[A-Za-z]/.test(ch);
+    const isLa = /[A-Za-z0-9()]/.test(ch);
     if (isAr) {
       if (kind === "ltr" && cur) {
         runs.push({ value: cur, isLtr: true });
@@ -266,10 +268,10 @@ function bidiIsolate(children) {
     if (child.type === "text") {
       const val = child.value;
       const hasAr = ARABIC_RE.test(val);
-      const hasLa = /[A-Za-z]/.test(val);
+      const hasLa = /[A-Za-z0-9()]/.test(val);
       if (hasAr && hasLa) {
         for (const run of splitRuns(val)) {
-          if (run.isLtr && /[A-Za-z0-9]/.test(run.value)) {
+          if (run.isLtr && /[A-Za-z0-9()]/.test(run.value)) {
             out.push({
               type: "element",
               tagName: "bdi",
@@ -313,19 +315,37 @@ var CSS = `
 /* Arabic RTL block elements */
 .arabic-rtl {
   direction: rtl;
-  text-align: start; /* respects the element's own direction */
-  letter-spacing: normal !important; /* Arabic script breaks with positive letter-spacing */
+  text-align: start;
+  letter-spacing: normal;
+  unicode-bidi: plaintext; /* CRITICAL: Isolates paragraph-level BiDi context */
 }
 
-/* <bdi dir="ltr"> and any explicit [dir="ltr"] inside RTL blocks:
-   unicode-bidi: isolate makes the browser treat each run independently */
-.arabic-rtl bdi[dir="ltr"],
-.arabic-rtl [dir="ltr"] {
+/* List items in RTL context \u2014 force proper numbering and marker alignment */
+.arabic-rtl ol,
+.arabic-rtl ul {
+  direction: rtl;
+  padding-inline-start: 0;
+  padding-inline-end: 2rem;
+}
+
+.arabic-rtl li {
+  direction: rtl;
+  text-align: start;
+}
+
+/* Numbered list markers \u2014 keep LTR to prevent flipping */
+.arabic-rtl ol li::marker {
+  direction: ltr;
   unicode-bidi: isolate;
 }
 
-/* Inline code / technical elements inside Arabic text \u2014 always LTR.
-   display:inline-block is needed so direction applies to an inline element. */
+/* <bdi dir="ltr"> and any explicit [dir="ltr"] inside RTL blocks */
+.arabic-rtl bdi[dir="ltr"],
+.arabic-rtl [dir="ltr"] {
+  unicode-bidi: isolate; /* CRITICAL: Forces browser to treat run as atomic LTR unit */
+}
+
+/* Inline code / technical elements inside Arabic text \u2014 always LTR */
 .arabic-rtl code,
 .arabic-rtl kbd,
 .arabic-rtl var,
