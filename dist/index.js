@@ -218,18 +218,29 @@ function strongDirOf(cls) {
   if (cls === "LATIN") return "ltr";
   return null;
 }
-var OPEN_BRACKETS = { "(": ")", "[": "]", "{": "}" };
-var CLOSE_BRACKETS = new Set(Object.values(OPEN_BRACKETS));
-function findBracketSpans(text) {
+var OPEN_TO_CLOSE = {
+  "(": ")",
+  "[": "]",
+  "{": "}",
+  "\u201C": "\u201D",
+  // “ ”
+  "\u2018": "\u2019",
+  // ‘ ’
+  "\xAB": "\xBB"
+  // « »
+};
+var CLOSERS = new Set(Object.values(OPEN_TO_CLOSE));
+var STRAIGHT_QUOTES = /* @__PURE__ */ new Set(['"', "'"]);
+function findAtomicSpans(text) {
   const spans = [];
   const stack = [];
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (ch in OPEN_BRACKETS) {
+    if (ch in OPEN_TO_CLOSE) {
       stack.push({ ch, idx: i });
-    } else if (CLOSE_BRACKETS.has(ch)) {
+    } else if (CLOSERS.has(ch)) {
       for (let j = stack.length - 1; j >= 0; j--) {
-        if (OPEN_BRACKETS[stack[j].ch] === ch) {
+        if (OPEN_TO_CLOSE[stack[j].ch] === ch) {
           if (j === 0) spans.push({ start: stack[j].idx, end: i });
           stack.length = j;
           break;
@@ -250,11 +261,19 @@ function dominantScript(text) {
   if (ar === 0 && lat === 0) return null;
   return ar >= lat ? "rtl" : "ltr";
 }
+function isWhitespace(ch) {
+  return ch === void 0 || /\s/.test(ch);
+}
+function isOpeningStraightQuote(text, idx) {
+  const prev = idx > 0 ? text[idx - 1] : void 0;
+  const next = idx < text.length - 1 ? text[idx + 1] : void 0;
+  return isWhitespace(prev) && next !== void 0 && !isWhitespace(next);
+}
 function splitIntoRuns(text) {
   if (!text) return [];
-  const bracketSpans = findBracketSpans(text);
+  const atomicSpans = findAtomicSpans(text);
   const atomicByStart = /* @__PURE__ */ new Map();
-  for (const span of bracketSpans) {
+  for (const span of atomicSpans) {
     const inner = text.slice(span.start + 1, span.end);
     const dir = dominantScript(inner) ?? "ltr";
     atomicByStart.set(span.start, { end: span.end, dir });
@@ -278,7 +297,11 @@ function splitIntoRuns(text) {
       i = atomic.end + 1;
       continue;
     }
-    const strong = strongDirOf(classify(text[i]));
+    const ch = text[i];
+    if (STRAIGHT_QUOTES.has(ch) && isOpeningStraightQuote(text, i)) {
+      closeRun(i);
+    }
+    const strong = strongDirOf(classify(ch));
     if (strong !== null) {
       if (runScript !== null && runScript !== strong) closeRun(i);
       runScript = strong;
@@ -326,6 +349,32 @@ function fixListDirection(tree) {
   });
 }
 
+// src/tables.ts
+function collectTableText(node) {
+  let out = "";
+  const walk = (n) => {
+    if (n.type === "text") out += n.value;
+    else if (n.type === "element") for (const c of n.children) walk(c);
+  };
+  for (const c of node.children) walk(c);
+  return out;
+}
+function fixTableDirection(tree) {
+  visit(tree, "element", (node) => {
+    if (node.tagName !== "table") return;
+    const dom = dominantScript(collectTableText(node));
+    if (dom === null) return;
+    node.properties = node.properties ?? {};
+    node.properties.dir = dom;
+    visit(node, "element", (row) => {
+      if (row.tagName === "tr") {
+        row.properties = row.properties ?? {};
+        row.properties.dir = dom;
+      }
+    });
+  });
+}
+
 // src/index.ts
 var BLOCK_TAGS = /* @__PURE__ */ new Set([
   "p",
@@ -350,14 +399,25 @@ var defaultOptions = {
 function textToBdiNodes(text) {
   const runs = splitIntoRuns(text);
   if (runs.length <= 1) return [{ type: "text", value: text }];
-  return runs.map(
-    (run) => ({
-      type: "element",
-      tagName: "bdi",
-      properties: { dir: run.dir },
-      children: [{ type: "text", value: run.text }]
-    })
-  );
+  const nodes = [];
+  for (const run of runs) {
+    const leadingMatch = run.text.match(/^\s+/);
+    const trailingMatch = run.text.match(/\s+$/);
+    const leading = leadingMatch ? leadingMatch[0] : "";
+    const trailing = trailingMatch ? trailingMatch[0] : "";
+    const core = run.text.slice(leading.length, run.text.length - trailing.length);
+    if (leading) nodes.push({ type: "text", value: leading });
+    if (core) {
+      nodes.push({
+        type: "element",
+        tagName: "bdi",
+        properties: { dir: run.dir },
+        children: [{ type: "text", value: core }]
+      });
+    }
+    if (trailing) nodes.push({ type: "text", value: trailing });
+  }
+  return nodes;
 }
 function processInlineChildren(node, skipTags) {
   const newChildren = [];
@@ -391,10 +451,20 @@ var ArabicBidi = (userOpts) => {
             }
           });
           fixListDirection(tree);
-          visit(tree, "element", (node) => {
+          fixTableDirection(tree);
+          visit(tree, "element", (node, _index, parent) => {
             if (skipTags.has(node.tagName)) return "skip";
             if (!BLOCK_TAGS.has(node.tagName)) return;
-            const dom = dominantScriptOfElement(node, skipTags);
+            let dom;
+            const parentTag = parent && "tagName" in parent ? parent.tagName : void 0;
+            if (node.tagName === "li" && (parentTag === "ol" || parentTag === "ul")) {
+              dom = parent.properties?.dir ?? null;
+            } else if (node.tagName === "td" || node.tagName === "th") {
+              dom = parent.properties?.dir ?? null;
+            } else {
+              dom = dominantScriptOfElement(node, skipTags);
+            }
+            if (dom === null) dom = dominantScriptOfElement(node, skipTags);
             if (dom === null) return;
             node.properties = node.properties ?? {};
             node.properties.dir = dom;
@@ -412,6 +482,8 @@ var ArabicBidi = (userOpts) => {
 bdi { unicode-bidi: isolate; }
 ol[dir="rtl"], ul[dir="rtl"] { padding-right: 1.5rem; padding-left: 0; }
 ol[dir="rtl"]::marker, ul[dir="rtl"]::marker { unicode-bidi: isolate; }
+table[dir="rtl"] { direction: rtl; }
+table[dir="ltr"] { direction: ltr; }
 code, pre, kbd, samp, var { direction: ltr; unicode-bidi: embed; }
             `.trim()
           }

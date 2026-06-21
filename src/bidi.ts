@@ -5,7 +5,7 @@ const ARABIC_INDIC_DIGIT = /[\u0660-\u0669\u06F0-\u06F9]/
 const LATIN_STRONG = /[A-Za-z\u00C0-\u024F]/
 const WESTERN_DIGIT = /[0-9]/
 
-type Dir = "rtl" | "ltr"
+export type Dir = "rtl" | "ltr"
 type CharClass = "AR" | "LATIN" | "AR_DIGIT" | "WEST_DIGIT" | "NEUTRAL"
 
 function classify(ch: string): CharClass {
@@ -27,30 +27,37 @@ export interface Run {
   dir: Dir
 }
 
-const OPEN_BRACKETS: Record<string, string> = { "(": ")", "[": "]", "{": "}" }
-const CLOSE_BRACKETS = new Set(Object.values(OPEN_BRACKETS))
+// Unified open→close map: real brackets + unambiguous curly quote pairs.
+// Both get atomic, stack-matched, never-split-apart treatment (UBA rule N0).
+const OPEN_TO_CLOSE: Record<string, string> = {
+  "(": ")",
+  "[": "]",
+  "{": "}",
+  "\u201C": "\u201D", // “ ”
+  "\u2018": "\u2019", // ‘ ’
+  "\u00AB": "\u00BB", // « »
+}
+const CLOSERS = new Set(Object.values(OPEN_TO_CLOSE))
 
-interface BracketSpan {
+// Ambiguous ASCII quotes — same character for open and close, so we
+// classify by context instead of stack-pairing.
+const STRAIGHT_QUOTES = new Set(['"', "'"])
+
+interface AtomicSpan {
   start: number
   end: number
 }
 
-/**
- * Stack-based bracket-pair scanner (not regex — regex cannot correctly
- * handle nested brackets, see Open Question §8). Only OUTERMOST pairs are
- * recorded as atomic spans; nested brackets are absorbed into their parent
- * span's content for direction-determination purposes.
- */
-function findBracketSpans(text: string): BracketSpan[] {
-  const spans: BracketSpan[] = []
+function findAtomicSpans(text: string): AtomicSpan[] {
+  const spans: AtomicSpan[] = []
   const stack: { ch: string; idx: number }[] = []
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]
-    if (ch in OPEN_BRACKETS) {
+    if (ch in OPEN_TO_CLOSE) {
       stack.push({ ch, idx: i })
-    } else if (CLOSE_BRACKETS.has(ch)) {
+    } else if (CLOSERS.has(ch)) {
       for (let j = stack.length - 1; j >= 0; j--) {
-        if (OPEN_BRACKETS[stack[j].ch] === ch) {
+        if (OPEN_TO_CLOSE[stack[j].ch] === ch) {
           if (j === 0) spans.push({ start: stack[j].idx, end: i })
           stack.length = j
           break
@@ -61,11 +68,6 @@ function findBracketSpans(text: string): BracketSpan[] {
   return spans
 }
 
-/**
- * Dominant script of a text span: counts strong characters (Arabic letters
- * vs Latin letters) and returns whichever has more. Returns null if the
- * span contains no strong characters at all (pure digits/punctuation).
- */
 export function dominantScript(text: string): Dir | null {
   let ar = 0
   let lat = 0
@@ -78,27 +80,39 @@ export function dominantScript(text: string): Dir | null {
   return ar >= lat ? "rtl" : "ltr"
 }
 
+function isWhitespace(ch: string | undefined): boolean {
+  return ch === undefined || /\s/.test(ch)
+}
+
+/**
+ * A straight quote is "opening" if preceded by whitespace/start-of-string
+ * and immediately followed by non-whitespace — the same heuristic
+ * smart-quote engines use. Opening quotes must attach FORWARD to the run
+ * that follows, never backward to the run that precedes (the bug in
+ * screenshot 4: "DNS: " swallowed the opening quote that belonged to the
+ * Arabic quoted phrase after it).
+ */
+function isOpeningStraightQuote(text: string, idx: number): boolean {
+  const prev = idx > 0 ? text[idx - 1] : undefined
+  const next = idx < text.length - 1 ? text[idx + 1] : undefined
+  return isWhitespace(prev) && next !== undefined && !isWhitespace(next)
+}
+
 /**
  * Splits text into directional runs.
  *
- * Rule (per engineering brief §6.1): a run keeps extending through neutral
- * and digit characters until a STRONG character of the OPPOSITE script
- * appears. Only then does the run close. This means trailing punctuation,
- * digits, and spaces stay attached to whichever run they are physically
- * adjacent to in the source text — we never manually decide where a lone
- * "." or "-" belongs; we let proximity decide, then hand the resulting
- * isolated runs to the browser's native UBA via <bdi>.
- *
- * Bracket pairs (§6.2) are resolved FIRST and treated as a single opaque
- * "super-character" with a fixed direction, so the general splitter can
- * never cut a bracket away from its content.
+ * - A run extends through neutral/digit characters until a STRONG
+ *   character of the OPPOSITE script appears (§6.1).
+ * - Bracket pairs AND curly-quote pairs are atomic — never split apart (§6.2).
+ * - Straight opening quotes force a boundary and attach forward, fixing
+ *   the "DNS: "" swallowing bug.
  */
 export function splitIntoRuns(text: string): Run[] {
   if (!text) return []
 
-  const bracketSpans = findBracketSpans(text)
+  const atomicSpans = findAtomicSpans(text)
   const atomicByStart = new Map<number, { end: number; dir: Dir }>()
-  for (const span of bracketSpans) {
+  for (const span of atomicSpans) {
     const inner = text.slice(span.start + 1, span.end)
     const dir = dominantScript(inner) ?? "ltr"
     atomicByStart.set(span.start, { end: span.end, dir })
@@ -126,7 +140,15 @@ export function splitIntoRuns(text: string): Run[] {
       continue
     }
 
-    const strong = strongDirOf(classify(text[i]))
+    const ch = text[i]
+
+    if (STRAIGHT_QUOTES.has(ch) && isOpeningStraightQuote(text, i)) {
+      // Force a boundary here; the quote itself becomes the leading
+      // character of the NEXT run, not the trailing character of this one.
+      closeRun(i)
+    }
+
+    const strong = strongDirOf(classify(ch))
     if (strong !== null) {
       if (runScript !== null && runScript !== strong) closeRun(i)
       runScript = strong
