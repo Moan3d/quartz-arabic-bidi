@@ -24,8 +24,8 @@ const defaultOptions: Required<Options> = {
  * separate plain text nodes, NEVER left inside the <bdi> tag — this is
  * the fix for screenshot 1 (space disappearing between HTTP and الأساس).
  */
-function textToBdiNodes(text: string, paragraphDir: Dir): ElementContent[] {
-  const runs = splitIntoRuns(text, paragraphDir)
+function textToBdiNodes(text: string): ElementContent[] {
+  const runs = splitIntoRuns(text)
   if (runs.length <= 1) return [{ type: "text", value: text } as Text]
 
   const nodes: ElementContent[] = []
@@ -50,15 +50,15 @@ function textToBdiNodes(text: string, paragraphDir: Dir): ElementContent[] {
   return nodes
 }
 
-function processInlineChildren(node: Element, skipTags: Set<string>, paragraphDir: Dir) {
+function processInlineChildren(node: Element, skipTags: Set<string>) {
   const newChildren: ElementContent[] = []
   for (const child of node.children) {
     if (child.type === "text") {
-      newChildren.push(...textToBdiNodes(child.value, paragraphDir))
+      newChildren.push(...textToBdiNodes(child.value))
     } else if (child.type === "element" && skipTags.has(child.tagName)) {
       newChildren.push(child)
     } else if (child.type === "element") {
-      processInlineChildren(child, skipTags, paragraphDir)
+      processInlineChildren(child, skipTags)
       newChildren.push(child)
     } else {
       newChildren.push(child)
@@ -118,7 +118,7 @@ export const ArabicBidi: QuartzTransformerPlugin<Options> = (userOpts) => {
             node.properties.dir = dom
             node.properties.lang = dom === "rtl" ? "ar" : "en"
 
-            processInlineChildren(node, skipTags, dom)
+            processInlineChildren(node, skipTags)
           })
         },
       ]

@@ -107,7 +107,7 @@ function isOpeningStraightQuote(text: string, idx: number): boolean {
  * - Straight opening quotes force a boundary and attach forward, fixing
  *   the "DNS: "" swallowing bug.
  */
-export function splitIntoRuns(text: string, paragraphDir: Dir = "rtl"): Run[] {
+export function splitIntoRuns(text: string): Run[] {
   if (!text) return []
 
   const atomicSpans = findAtomicSpans(text)
@@ -118,94 +118,44 @@ export function splitIntoRuns(text: string, paragraphDir: Dir = "rtl"): Run[] {
     atomicByStart.set(span.start, { end: span.end, dir })
   }
 
-  interface Token {
-    text: string
-    type: "ltr" | "rtl" | "neutral"
-    resolved?: Dir
-  }
-
-  const tokens: Token[] = []
+  const runs: Run[] = []
+  let runStart = 0
+  let runScript: Dir | null = null
   let i = 0
+
+  const closeRun = (end: number) => {
+    if (end > runStart) {
+      runs.push({ text: text.slice(runStart, end), dir: runScript ?? "ltr" })
+    }
+    runStart = end
+    runScript = null
+  }
 
   while (i < text.length) {
     const atomic = atomicByStart.get(i)
     if (atomic) {
-      tokens.push({
-        text: text.slice(i, atomic.end + 1),
-        type: atomic.dir,
-      })
+      if (runScript !== null && runScript !== atomic.dir) closeRun(i)
+      if (runScript === null) runScript = atomic.dir
       i = atomic.end + 1
       continue
     }
 
     const ch = text[i]
-    const cls = classify(ch)
-    let type: "ltr" | "rtl" | "neutral" = "neutral"
-    if (cls === "AR") type = "rtl"
-    else if (cls === "LATIN") type = "ltr"
 
-    tokens.push({ text: ch, type })
+    if (STRAIGHT_QUOTES.has(ch) && isOpeningStraightQuote(text, i)) {
+      // Force a boundary here; the quote itself becomes the leading
+      // character of the NEXT run, not the trailing character of this one.
+      closeRun(i)
+    }
+
+    const strong = strongDirOf(classify(ch))
+    if (strong !== null) {
+      if (runScript !== null && runScript !== strong) closeRun(i)
+      runScript = strong
+    }
     i++
   }
-
-  // Resolve neutral sequences using UBA context rules
-  let idx = 0
-  while (idx < tokens.length) {
-    if (tokens[idx].type !== "neutral") {
-      tokens[idx].resolved = tokens[idx].type as Dir
-      idx++
-      continue
-    }
-
-    let startNeutral = idx
-    while (idx < tokens.length && tokens[idx].type === "neutral") {
-      idx++
-    }
-    let endNeutral = idx - 1
-
-    // Find strong direction before the neutral sequence
-    let before: Dir = paragraphDir
-    for (let j = startNeutral - 1; j >= 0; j--) {
-      if (tokens[j].type !== "neutral") {
-        before = tokens[j].type as Dir
-        break
-      }
-    }
-
-    // Find strong direction after the neutral sequence
-    let after: Dir = paragraphDir
-    for (let j = endNeutral + 1; j < tokens.length; j++) {
-      if (tokens[j].type !== "neutral") {
-        after = tokens[j].type as Dir
-        break
-      }
-    }
-
-    // If neutrals are surrounded by the same script, adopt it. 
-    // Otherwise, fallback safely to the paragraph's dominant direction.
-    const finalDir = before === after ? before : paragraphDir
-    for (let j = startNeutral; j <= endNeutral; j++) {
-      tokens[j].resolved = finalDir
-    }
-  }
-
-  // Group tokens into structural runs
-  const runs: Run[] = []
-  if (tokens.length === 0) return []
-
-  let currentText = tokens[0].text
-  let currentDir = tokens[0].resolved!
-
-  for (let j = 1; j < tokens.length; j++) {
-    if (tokens[j].resolved === currentDir) {
-      currentText += tokens[j].text
-    } else {
-      runs.push({ text: currentText, dir: currentDir })
-      currentText = tokens[j].text
-      currentDir = tokens[j].resolved!
-    }
-  }
-  runs.push({ text: currentText, dir: currentDir })
+  closeRun(text.length)
 
   return runs.filter((r) => r.text.length > 0)
 }
