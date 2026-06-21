@@ -1,6 +1,7 @@
 {
-  "name": "arabic-bidi",
+  "name": "quartz-arabic-bidi",
   "version": "1.0.0",
+  "description": "Script-aware Arabic/English bidirectional run isolation for Quartz v5 — atomic bracket pairs, container-level list direction, EN/AN digit awareness.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,20 +11,41 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "quartz": {
-    "pluginName": "ArabicBidi",
-    "category": ["transformer"]
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
   },
   "dependencies": {
-    "@quartz-community/types": "github:quartz-community/types",
-    "unist-util-visit": "^5.0.0"
+    "unist-util-visit": "^5.1.0"
   },
   "devDependencies": {
+    "@quartz-community/types": "github:quartz-community/types",
     "@types/hast": "^3.0.4",
-    "tsup": "^8.0.0",
-    "typescript": "^5.0.0"
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
   },
-  "scripts": {
-    "build": "tsup"
-  }
+  "peerDependencies": {
+    "@quartz-community/types": "github:quartz-community/types"
+  },
+  "quartz": {
+    "category": [
+      "transformer"
+    ],
+    "displayName": "Arabic Bidi",
+    "description": "Correct bidirectional rendering for mixed Arabic/English content"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moan3d/quartz-arabic-bidi.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Moan3d/quartz-arabic-bidi/issues"
+  },
+  "homepage": "https://github.com/Moan3d/quartz-arabic-bidi#readme"
 }

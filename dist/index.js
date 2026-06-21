@@ -201,192 +201,227 @@ function visit(tree, testOrVisitor, visitorOrReverse, maybeReverse) {
   }
 }
 
+// src/bidi.ts
+var ARABIC_RANGE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+var ARABIC_INDIC_DIGIT = /[\u0660-\u0669\u06F0-\u06F9]/;
+var LATIN_STRONG = /[A-Za-z\u00C0-\u024F]/;
+var WESTERN_DIGIT = /[0-9]/;
+function classify(ch) {
+  if (ARABIC_RANGE.test(ch)) return "AR";
+  if (LATIN_STRONG.test(ch)) return "LATIN";
+  if (ARABIC_INDIC_DIGIT.test(ch)) return "AR_DIGIT";
+  if (WESTERN_DIGIT.test(ch)) return "WEST_DIGIT";
+  return "NEUTRAL";
+}
+function strongDirOf(cls) {
+  if (cls === "AR") return "rtl";
+  if (cls === "LATIN") return "ltr";
+  return null;
+}
+var OPEN_BRACKETS = { "(": ")", "[": "]", "{": "}" };
+var CLOSE_BRACKETS = new Set(Object.values(OPEN_BRACKETS));
+function findBracketSpans(text) {
+  const spans = [];
+  const stack = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch in OPEN_BRACKETS) {
+      stack.push({ ch, idx: i });
+    } else if (CLOSE_BRACKETS.has(ch)) {
+      for (let j = stack.length - 1; j >= 0; j--) {
+        if (OPEN_BRACKETS[stack[j].ch] === ch) {
+          if (j === 0) spans.push({ start: stack[j].idx, end: i });
+          stack.length = j;
+          break;
+        }
+      }
+    }
+  }
+  return spans;
+}
+function dominantScript(text) {
+  let ar = 0;
+  let lat = 0;
+  for (const ch of text) {
+    const cls = classify(ch);
+    if (cls === "AR") ar++;
+    else if (cls === "LATIN") lat++;
+  }
+  if (ar === 0 && lat === 0) return null;
+  return ar >= lat ? "rtl" : "ltr";
+}
+function splitIntoRuns(text) {
+  if (!text) return [];
+  const bracketSpans = findBracketSpans(text);
+  const atomicByStart = /* @__PURE__ */ new Map();
+  for (const span of bracketSpans) {
+    const inner = text.slice(span.start + 1, span.end);
+    const dir = dominantScript(inner) ?? "ltr";
+    atomicByStart.set(span.start, { end: span.end, dir });
+  }
+  const runs = [];
+  let runStart = 0;
+  let runScript = null;
+  let i = 0;
+  const closeRun = (end) => {
+    if (end > runStart) {
+      runs.push({ text: text.slice(runStart, end), dir: runScript ?? "ltr" });
+    }
+    runStart = end;
+    runScript = null;
+  };
+  while (i < text.length) {
+    const atomic = atomicByStart.get(i);
+    if (atomic) {
+      if (runScript !== null && runScript !== atomic.dir) closeRun(i);
+      if (runScript === null) runScript = atomic.dir;
+      i = atomic.end + 1;
+      continue;
+    }
+    const strong = strongDirOf(classify(text[i]));
+    if (strong !== null) {
+      if (runScript !== null && runScript !== strong) closeRun(i);
+      runScript = strong;
+    }
+    i++;
+  }
+  closeRun(text.length);
+  return runs.filter((r) => r.text.length > 0);
+}
+function dominantScriptOfElement(node, skipTags) {
+  let text = "";
+  const walk = (n) => {
+    if (n.type === "text") text += n.value;
+    else if (n.type === "element" && !skipTags.has(n.tagName)) {
+      for (const c of n.children) walk(c);
+    }
+  };
+  for (const c of node.children) walk(c);
+  return dominantScript(text);
+}
+
+// src/lists.ts
+function collectListText(node) {
+  let out = "";
+  const walk = (n) => {
+    if (n.type === "text") out += n.value;
+    else if (n.type === "element" && n.tagName !== "ol" && n.tagName !== "ul") {
+      for (const c of n.children) walk(c);
+    }
+  };
+  for (const c of node.children) walk(c);
+  return out;
+}
+function fixListDirection(tree) {
+  visit(tree, "element", (node) => {
+    if (node.tagName !== "ol" && node.tagName !== "ul") return;
+    const dom = dominantScript(collectListText(node));
+    if (dom === null) return;
+    node.properties = node.properties ?? {};
+    node.properties.dir = dom;
+    if (dom === "rtl") {
+      const existing = node.properties.style ?? "";
+      node.properties.style = `${existing} list-style-position: inside;`.trim();
+    }
+  });
+}
+
 // src/index.ts
-var ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-var BLOCK_ELEMENTS = /* @__PURE__ */ new Set([
+var BLOCK_TAGS = /* @__PURE__ */ new Set([
   "p",
   "li",
+  "blockquote",
+  "td",
+  "th",
+  "dt",
+  "dd",
   "h1",
   "h2",
   "h3",
   "h4",
   "h5",
   "h6",
-  "blockquote",
-  "td",
-  "th",
   "figcaption",
-  "dt",
-  "dd",
-  "nav",
-  "a"
+  "caption"
 ]);
-var ALWAYS_LTR = /* @__PURE__ */ new Set(["code", "kbd", "var", "samp"]);
-function getTextContent(node) {
-  if (node.type === "text") return node.value;
-  if ("children" in node)
-    return node.children.map(getTextContent).join("");
-  return "";
+var defaultOptions = {
+  ltrTags: ["code", "pre", "kbd", "samp", "var"]
+};
+function textToBdiNodes(text) {
+  const runs = splitIntoRuns(text);
+  if (runs.length <= 1) return [{ type: "text", value: text }];
+  return runs.map(
+    (run) => ({
+      type: "element",
+      tagName: "bdi",
+      properties: { dir: run.dir },
+      children: [{ type: "text", value: run.text }]
+    })
+  );
 }
-function isDominantArabic(text) {
-  const ar = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) ?? []).length;
-  const la = (text.match(/[A-Za-z]/g) ?? []).length;
-  return ar > 0 && ar >= la;
-}
-function splitRuns(text) {
-  const runs = [];
-  if (!text) return runs;
-  let cur = "";
-  let kind = ARABIC_RE.test(text[0] ?? "") ? "arabic" : "ltr";
-  for (const ch of text) {
-    const isAr = ARABIC_RE.test(ch);
-    const isLa = /[A-Za-z0-9()]/.test(ch);
-    if (isAr) {
-      if (kind === "ltr" && cur) {
-        runs.push({ value: cur, isLtr: true });
-        cur = "";
-      }
-      kind = "arabic";
-      cur += ch;
-    } else if (isLa) {
-      if (kind === "arabic" && cur) {
-        runs.push({ value: cur, isLtr: false });
-        cur = "";
-      }
-      kind = "ltr";
-      cur += ch;
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur) runs.push({ value: cur, isLtr: kind === "ltr" });
-  return runs;
-}
-function bidiIsolate(children) {
-  const out = [];
-  for (const child of children) {
+function processInlineChildren(node, skipTags) {
+  const newChildren = [];
+  for (const child of node.children) {
     if (child.type === "text") {
-      const val = child.value;
-      const hasAr = ARABIC_RE.test(val);
-      const hasLa = /[A-Za-z0-9()]/.test(val);
-      if (hasAr && hasLa) {
-        for (const run of splitRuns(val)) {
-          if (run.isLtr && /[A-Za-z0-9()]/.test(run.value)) {
-            out.push({
-              type: "element",
-              tagName: "bdi",
-              properties: { dir: "ltr" },
-              children: [{ type: "text", value: run.value }]
-            });
-          } else {
-            out.push({ type: "text", value: run.value });
-          }
+      newChildren.push(...textToBdiNodes(child.value));
+    } else if (child.type === "element" && skipTags.has(child.tagName)) {
+      newChildren.push(child);
+    } else if (child.type === "element") {
+      processInlineChildren(child, skipTags);
+      newChildren.push(child);
+    } else {
+      newChildren.push(child);
+    }
+  }
+  node.children = newChildren;
+}
+var ArabicBidi = (userOpts) => {
+  const opts = { ...defaultOptions, ...userOpts };
+  const skipTags = new Set(opts.ltrTags);
+  return {
+    name: "ArabicBidi",
+    htmlPlugins() {
+      return [
+        () => (tree) => {
+          visit(tree, "element", (node) => {
+            if (skipTags.has(node.tagName)) {
+              node.properties = node.properties ?? {};
+              node.properties.dir = "ltr";
+              return "skip";
+            }
+          });
+          fixListDirection(tree);
+          visit(tree, "element", (node) => {
+            if (skipTags.has(node.tagName)) return "skip";
+            if (!BLOCK_TAGS.has(node.tagName)) return;
+            const dom = dominantScriptOfElement(node, skipTags);
+            if (dom === null) return;
+            node.properties = node.properties ?? {};
+            node.properties.dir = dom;
+            node.properties.lang = dom === "rtl" ? "ar" : "en";
+            processInlineChildren(node, skipTags);
+          });
         }
-      } else {
-        out.push(child);
-      }
-      continue;
-    }
-    if (child.type === "element") {
-      const el = child;
-      if (BLOCK_ELEMENTS.has(el.tagName)) {
-        out.push(el);
-        continue;
-      }
-      if (ALWAYS_LTR.has(el.tagName)) {
-        el.properties = { ...el.properties ?? {}, dir: "ltr" };
-        out.push(el);
-        continue;
-      }
-      const innerText = getTextContent(el);
-      if (innerText && !isDominantArabic(innerText)) {
-        el.properties = { ...el.properties ?? {}, dir: "ltr" };
-      } else if (el.children) {
-        el.children = bidiIsolate(el.children);
-      }
-      out.push(el);
-      continue;
-    }
-    out.push(child);
-  }
-  return out;
-}
-var CSS = `
-/* Arabic RTL block elements */
-.arabic-rtl {
-  direction: rtl;
-  text-align: start;
-  letter-spacing: normal;
-  unicode-bidi: plaintext; /* CRITICAL: Isolates paragraph-level BiDi context */
-}
-
-/* List items in RTL context \u2014 force proper numbering and marker alignment */
-.arabic-rtl ol,
-.arabic-rtl ul {
-  direction: rtl;
-  padding-inline-start: 0;
-  padding-inline-end: 2rem;
-}
-
-.arabic-rtl li {
-  direction: rtl;
-  text-align: start;
-}
-
-/* Numbered list markers \u2014 keep LTR to prevent flipping */
-.arabic-rtl ol li::marker {
-  direction: ltr;
-  unicode-bidi: isolate;
-}
-
-/* <bdi dir="ltr"> and any explicit [dir="ltr"] inside RTL blocks */
-.arabic-rtl bdi[dir="ltr"],
-.arabic-rtl [dir="ltr"] {
-  unicode-bidi: isolate; /* CRITICAL: Forces browser to treat run as atomic LTR unit */
-}
-
-/* Inline code / technical elements inside Arabic text \u2014 always LTR */
-.arabic-rtl code,
-.arabic-rtl kbd,
-.arabic-rtl var,
-.arabic-rtl samp {
-  direction: ltr;
-  unicode-bidi: isolate;
-  display: inline-block;
-  vertical-align: baseline;
-}
-`;
-var ArabicBidi = () => ({
-  name: "ArabicBidi",
-  htmlPlugins() {
-    return [
-      () => (tree) => {
-        visit(tree, "element", (node) => {
-          if (!BLOCK_ELEMENTS.has(node.tagName)) return;
-          const text = getTextContent(node);
-          if (!text.trim()) return;
-          if (isDominantArabic(text)) {
-            node.properties = {
-              ...node.properties ?? {},
-              dir: "rtl",
-              lang: "ar",
-              className: [
-                ...node.properties?.className ?? [],
-                "arabic-rtl"
-              ]
-            };
-            node.children = bidiIsolate(node.children);
+      ];
+    },
+    externalResources() {
+      return {
+        css: [
+          {
+            content: `
+bdi { unicode-bidi: isolate; }
+ol[dir="rtl"], ul[dir="rtl"] { padding-right: 1.5rem; padding-left: 0; }
+ol[dir="rtl"]::marker, ul[dir="rtl"]::marker { unicode-bidi: isolate; }
+code, pre, kbd, samp, var { direction: ltr; unicode-bidi: embed; }
+            `.trim()
           }
-        });
-      }
-    ];
-  },
-  externalResources() {
-    return {
-      css: [{ content: CSS }]
-    };
-  }
-});
+        ]
+      };
+    }
+  };
+};
+var index_default = ArabicBidi;
 export {
-  ArabicBidi
+  ArabicBidi,
+  index_default as default
 };
